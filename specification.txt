@@ -1,0 +1,598 @@
+STUDENT NUMBER: 25064762
+
+PACMAN PROTOCOL SPECIFICATION VERSION 1
+
+–––––––––––––––
+1. Introduction
+–––––––––––––––
+
+1.1 Terminology
+
+    This specification uses the terms MUST, SHOULD, and MAY as defined in
+    RFC 2119.
+
+    The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+    "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+    document are to be interpreted as described in RFC 2119.
+
+1.2 Protocol Overview
+
+    This Pacman Protocol Version 1 enables cooperative Pacman gameplay over 
+    a network. The protocol uses TCP on port 5432 for reliable delivery of 
+    critical events and UDP on port 5433 for low-latency position updates.
+
+    The protocol supports 9 message types divided into three categories:
+
+        1. Connection – Password exchange and game synchronization
+        2. State – Maze layout and game mode
+        3. Update – Position, eating, and combined score/lives updates
+
+    The message types are the following: 
+    1. PASSWORD_EXCHANGE
+    2. SYNC_START
+    3. MAZE_UPDATE
+    4. GAME_MODE_UPDATE
+    5. PACMAN_POSITION
+    6. GHOST_POSITION
+    7. PACMAN_EVENT
+    8. EAT
+    9. LIVES_SCORE_UPDATE
+
+    Each player controls their own Pacman on their local screen. When a 
+    Pacman enters a tunnel on one edge of the screen, it transitions to the 
+    other player's screen and appears from the opposite tunnel. The protocol 
+    synchronizes positions, game events, scores, and lives between both 
+    players.
+
+1.3 Game Mechanics Relevant to Protocol
+
+    Screen Layout – Each player views their own screen (local) and the other 
+    player's screen (remote). Coordinates in protocol messages are pixel 
+    positions relative to the screen origin [the top left being (0,0)].
+
+    Terminology:
+    - LOCAL: A game object currently on the local screen
+    - AWAY: Our Pacman is currently on the remote screen
+    - REMOTE: A game object on the remote screen
+    - FOREIGN: The other player's Pacman when visiting our screen
+
+    Ghost Management – Four ghosts exist on each player's local screen.
+    Ghosts are unable to traverse tunnels between screens. 
+    Ghost positions are synchronized to the remote player 
+    via GHOST_POSITION messages to enable collision detection with the 
+    foreign Pacman.
+
+    Food Synchronization – Dots and power pills exist on both screens. When 
+    food is eaten on either screen, an EAT message removes it from both 
+    screens.
+
+1.4 Transport Protocol Rationale
+
+    This protocol uses TCP (port 5432) for reliable delivery of critical
+    events and UDP (port 5433) for low-latency position updates.
+
+    TCP is used for:
+    - PASSWORD_EXCHANGE: Connection establishment
+    - SYNC_START: Game synchronization
+    - MAZE_UPDATE: Large data transfer, must not be lost
+    - GAME_MODE_UPDATE: State changes
+    - PACMAN_EVENT: Critical Pacman events
+    - EAT: Critical eating events
+    - LIVES_SCORE_UPDATE: Score and lives synchronization
+
+    UDP is used for:
+    - PACMAN_POSITION: High-frequency position updates (20 fps)
+    - GHOST_POSITION: High-frequency position updates (20 fps × 4 ghosts)
+
+    Rationale: Position updates are sent frequently and benefit from UDP's 
+    lower latency. If one position update is lost, the next update replaces 
+    it anyway. Critical events like eating food or game mode changes must 
+    arrive reliably, so TCP is used. This hybrid approach provides both 
+    speed and reliability where each is needed.
+    
+––––––––––––––––––––––––––– 
+2. Connection Establishment 
+–––––––––––––––––––––––––––
+
+2.1 Prerequisites
+
+    Before connection, both players MUST agree upon:
+    - Server's IP address
+    - Shared password (maximum 15 ASCII characters)
+
+2.2 Connection Sequence
+
+    Both players must provide the same IP address and password to join the 
+    same game. Once passwords are exchanged and confirmed correct, the maze 
+    data is exchanged between players. A synchronization message is then 
+    sent from the server so both games can start simultaneously.
+
+–––––––––––––––––––
+3. Message Encoding
+–––––––––––––––––––
+
+Messages are fixed format, binary encoded, with all integer fields 
+sent in network byte order (big-endian). As message type is fixed 
+format, no explicit length field is required.
+
+TCP messages use fixed-format binary encoding:
+- Type field in first 4 bits identifies message
+- Remaining bits contain payload data
+
+UDP messages include a 2-byte sequence number prefix:
+- Sequence number (big-endian)
+- Followed by fixed-format message
+
+The sender MUST increment sequence numbers and wrap at 65535.
+The receiver SHOULD discard out-of-order messages.
+
+––––––––––––––––––––––––––––––––––––––
+4. Message Content, Timing, and Encoding
+––––––––––––––––––––––––––––––––––––––
+
+4.1 PASSWORD_EXCHANGE
+
+    Contents:
+
+    - Type: PASSWORD_EXCHANGE
+    - Password: Password entered by the player. Passwords are limited to 
+      printable ASCII characters (0x20-0x7E) with a maximum length of 15 
+      characters. The password is null-terminated (0x00). Remaining bytes 
+      after null are zero-filled.
+
+    Timing:
+
+    PASSWORD_EXCHANGE messages MUST be sent once when a client connects to 
+    the server.
+
+    Transport: TCP (port 5432)
+
+    Internal format: Not applicable (new message type)
+
+    Encoding:
+
+    PASSWORD_EXCHANGE messages consist of 17 bytes, encoded as follows:
+
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |   T   |   U   |                 Password (continued)          |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                         Password (continued)                  |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                         Password (continued)                  |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                         Password (continued)                  |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                         Password                              |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+    Fields:
+    - T: 4-bit type field = 0x1
+    - U: 4 bits unused (must be zero)
+    - Password: 128 bits (16 bytes)
+      > Maximum 15 ASCII characters
+      > Null-terminated (0x00)
+      > Remaining bytes after null are zero
+
+4.2 SYNC_START
+
+    Contents:
+
+    - Type: SYNC_START
+    - Start Time: The server sends a Unix timestamp (current time + 1 second) 
+      to synchronize game start. Both clients wait until this time before 
+      starting gameplay.
+
+    Timing:
+
+    SYNC_START MUST be sent after maze exchange, before game starts.
+
+    Transport: TCP (port 5432)
+
+    Internal format: Not applicable (new message type)
+
+    Encoding:
+
+    SYNC_START messages consist of 5 bytes, encoded as follows:
+
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |   T   |   U   |             Start Time (continued)            |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |  Start Time   |
+    +-+-+-+-+-+-+-+-+
+
+    Fields:
+    - T: 4-bit type field = 0x2
+    - U: 4 bits unused (must be zero)
+    - Start Time: 32-bit unsigned integer (Unix timestamp)
+      > Current time + 1 second
+      > Big-endian byte order
+
+4.3 MAZE_UPDATE
+
+    Contents:
+
+    - Type: MAZE_UPDATE
+    - Maze: The maze layout consists of 84 columns × 31 rows = 868 squares.
+      Each square is represented by 4 bits, encoding one of 12 possible 
+      square types. Two squares are packed per byte.
+
+    Square encoding (4 bits per square):
+        0x0: " /-"  (top-left corner)
+        0x1: "-/ "  (top-right corner)
+        0x2: "---"  (horizontal wall)
+        0x3: "-\\ " (bottom-right corner)
+        0x4: " \\-" (bottom-left corner)
+        0x5: " | "  (vertical wall)
+        0x6: "###"  (ghost house wall)
+        0x7: "   "  (empty space)
+        0x8: " . "  (food pellet)
+        0x9: " * "  (power pill)
+        0xA: " A "  (left tunnel entrance)
+        0xB: " B "  (right tunnel entrance)
+
+    Timing:
+
+    MAZE_UPDATE MUST be sent once during connection establishment.
+
+    Transport: TCP (port 5432)
+
+    Internal format: ["maze", maze_object]
+
+    Encoding:
+
+    MAZE_UPDATE messages consist of 435 bytes, encoded as follows:
+
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |   T   |   U   | Sqr 1 | Sqr 2 | Sqr 3 | Sqr 4 | Sqr 5 | Sqr 6 |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                    ... (434 bytes total) ...                  |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |Sqr 866|Sqr 867|Sqr 868|
+    +-+-+-+-+-+-+-+-+-+-+-+-+
+
+    Fields:
+    - T: 4-bit type field = 0x3
+    - U: 4 bits unused (must be zero)
+    - Squares: 868 squares × 4 bits each = 434 bytes
+      > 2 squares per byte
+      > Packed from most significant nibble
+
+4.4 GAME_MODE_UPDATE
+
+    Contents:
+
+    - Type: GAME_MODE_UPDATE
+    - Game Mode: The local game board has 6 states, each represented by a 
+      3-bit integer:
+      > 0: STARTUP
+      > 1: CHASE
+      > 2: FRIGHTEN
+      > 3: GAME_OVER
+      > 4: NEXT_LEVEL_WAIT
+      > 5: READY_TO_RESTART
+
+    Timing:
+
+    GAME_MODE_UPDATE messages MUST be sent when game mode changes:
+    - STARTUP → CHASE
+    - CHASE → FRIGHTEN (power pill eaten)
+    - FRIGHTEN → CHASE (frighten mode expires)
+    - Any mode → GAME_OVER
+    - GAME_OVER → READY_TO_RESTART
+    - READY_TO_RESTART → STARTUP
+
+    Transport: TCP (port 5432)
+
+    Internal format: ["status", [status]]
+
+    Encoding:
+
+    GAME_MODE_UPDATE messages consist of 1 byte, encoded as follows:
+
+     0 1 2 3 4 5 6 7
+    +-+-+-+-+-+-+-+-+
+    |   T   |U|  GM |
+    +-+-+-+-+-+-+-+-+
+
+    Fields:
+    - T: 4-bit type field = 0x4
+    - U: 1 bit unused (must be zero)
+    - GM: 3-bit game mode
+
+4.5 PACMAN_POSITION
+
+    Contents:
+
+    - Type: PACMAN_POSITION
+    - Position X, Y: Pixel coordinates (0-1023 for both X and Y)
+      > X: 0 = left edge, 1023 = right edge
+      > Y: 0 = top edge, 1023 = bottom edge
+    - Direction: 2-bit value
+      > 0: UP
+      > 1: LEFT
+      > 2: RIGHT
+      > 3: DOWN
+    - Speed: 1-bit value
+      > 0: Stationary
+      > 1: Moving
+
+    Timing:
+
+    PACMAN_POSITION messages SHOULD be sent at 20fps when 
+    position or state changes.
+
+    Transport: UDP (port 5433)
+
+    Internal format: ["pacman", [position, direction, speed]]
+
+    Encoding:
+
+    PACMAN_POSITION messages consist of 6 bytes total (2 seq + 4 message):
+
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |      Sequence Number          |   T   |    U    |   Pac X Pos |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |ition  |   Pac Y Position  | D |S|
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+    Fields:
+    - Sequence: 16-bit unsigned integer
+    - T: 4-bit type field = 0x5
+    - U: 5 bits unused (must be zero)
+    - Pac X Position: 10 bits (0-1023)
+    - Pac Y Position: 10 bits (0-1023)
+    - D: 2-bit direction
+    - S: 1-bit speed
+
+4.6 GHOST_POSITION
+
+    Contents:
+
+    - Type: GHOST_POSITION
+    - Ghost Number: 2-bit identifier
+      > 0: Blinky (red)
+      > 1: Pinky (pink)
+      > 2: Inky (cyan)
+      > 3: Clyde (orange)
+    - Position X, Y: Pixel coordinates (0-1023 for both X and Y)
+      > X: 0 = left edge, 1023 = right edge
+      > Y: 0 = top edge, 1023 = bottom edge
+    - Direction: 2-bit value
+      > 0: UP
+      > 1: LEFT
+      > 2: RIGHT
+      > 3: DOWN
+    - Mode: 3-bit ghost mode
+      > 0: SCATTER
+      > 1: CHASE
+      > 2: FRIGHTEN
+      > 3: FRIGHTEN_TRAPPED
+      > 4: EYES
+    - Speed: 32-bit IEEE 754 float (position units per 50ms)
+
+    Timing:
+
+    GHOST_POSITION messages SHOULD be sent at 20fps for each 
+    ghost. Each message specifies information about one ghost only. Four 
+    messages are sent together, one for each ghost.
+
+    Transport: UDP (port 5433)
+
+    Internal format: ["ghost", [ghostnum, position, direction, speed, mode]]
+
+    Encoding:
+
+    GHOST_POSITION messages consist of 10 bytes total (2 seq + 8 message):
+
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |      Sequence Number          |   T   |U|GN |Drn|  Ghost X Pos|
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |ition  |  Ghost Y Position |Mode |         Speed (continued)   |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |     Speed     |
+    +-+-+-+-+-+-+-+-+
+
+    Fields:
+    - Sequence: 16-bit unsigned integer
+    - T: 4-bit type field = 0x6
+    - U: 1 bit unused (must be zero)
+    - GN: 2-bit ghost number
+    - Drn: 2-bit direction
+    - Ghost X Position: 10 bits (0-1023)
+    - Ghost Y Position: 10 bits (0-1023)
+    - Mode: 3 bits
+    - Speed: 32-bit IEEE 754 float
+
+4.7 PACMAN_EVENT
+
+    Contents:
+
+    - Type: PACMAN_EVENT
+    - Foreign Status: 2-bit value indicating foreign Pacman presence
+      > 00: No foreign Pacman / foreign Pacman left
+      > 01: Foreign Pacman arrived from left tunnel
+      > 10: Foreign Pacman arrived from right tunnel
+    - Died: 1-bit flag (1=died, 0=alive)
+    - Go Home: 1-bit flag indicating forced return
+      > 1: Pacman must go home
+      > 0: Normal operation
+
+    Timing:
+
+    PACMAN_EVENT messages MUST be sent immediately when Pacman status 
+    changes:
+    - Foreign Pacman arrived (with tunnel side)
+    - Foreign Pacman left
+    - Pacman died
+    - Pacman go home
+
+    Transport: TCP (port 5432)
+
+    Internal format: Multiple internal messages mapped to one wire message:
+    - ["newpacman", []] → Foreign Status = 0b01
+    - ["pacmanleft", []] → Foreign Status = 0b00
+    - ["pacmandied", []] → Died = 1
+    - ["pacmanhome", []] → Go Home = 1
+
+    Encoding:
+
+    PACMAN_EVENT messages consist of 2 bytes, encoded as follows:
+
+     0                   1
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |   T   |       U       | F |D|H|
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+    Fields:
+    - T: 4-bit type field = 0x7
+    - U: 8 bits unused (must be zero)
+    - F: 2-bit foreign status
+    - D: 1-bit died flag
+    - H: 1-bit go home flag
+
+4.8 EAT
+
+    Contents:
+
+    - Type: EAT
+    - Food/Power Pill: 2-bit value
+      > 00: Nothing eaten (used when only ghost eaten)
+      > 01: Food pellet eaten
+      > 10: Power pill eaten
+    - Food Position X, Y: Pixel coordinates (0-1023 for both X and Y)
+    - Ghost Eaten (local): 4-bit value
+      > 0000: No ghost eaten
+      > 1000: Blinky eaten (bit 3=1, bits 1-0=00)
+      > 1001: Pinky eaten (bit 3=1, bits 1-0=01)
+      > 1010: Inky eaten (bit 3=1, bits 1-0=10)
+      > 1011: Clyde eaten (bit 3=1, bits 1-0=11)
+    - Ghost Eaten (foreign): 4-bit value (same encoding as above)
+
+    Timing:
+
+    EAT messages MUST be sent immediately when:
+    - Food/power pill eaten (with position)
+    - Ghost eaten by local Pacman
+    - Ghost eaten by foreign Pacman
+
+    Transport: TCP (port 5432)
+
+    Internal format: Multiple internal messages mapped to one wire message:
+    - ["eat", [position, is_foreign, is_powerpill]] → FP, X, Y
+    - ["ghosteaten", [ghostnum]] → GE field
+
+    Encoding:
+
+    EAT messages consist of 5 bytes, encoded as follows:
+
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |   T   |     U     |FP |  Food X Position  |  Food Y Position  |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |   GE  | FPAE  |
+    +-+-+-+-+-+-+-+-+
+
+    Fields:
+    - T: 4-bit type field = 0x8
+    - U: 6 bits unused (must be zero)
+    - FP: 2-bit food/power pill
+    - Food X Position: 10 bits (0-1023)
+    - Food Y Position: 10 bits (0-1023)
+    - GE: 4-bit ghost eaten by local Pacman
+    - FPAE: 4-bit ghost eaten by foreign Pacman
+
+4.9 LIVES_SCORE_UPDATE
+
+    Contents:
+
+    - Type: LIVES_SCORE_UPDATE
+    - Lives: 3-bit integer (0-5) indicating remaining lives
+    - Score: 22-bit integer (0 to 4,194,303)
+      > Maximum Pacman score is 3,333,360
+      > 22 bits required: (2^21) - 1 < 3,333,360 < (2^22) - 1
+
+    Timing:
+
+    LIVES_SCORE_UPDATE messages SHOULD be sent at 20fps. This 
+    combined message reduces overhead by sending both values together.
+
+    Transport: TCP (port 5432)
+
+    Internal format: Combines two internal messages:
+    - ["lives", [lives]]
+    - ["score", [score]]
+
+    Encoding:
+
+    LIVES_SCORE_UPDATE messages consist of 4 bytes, encoded as follows:
+
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |   T   |  U  |Lives|                Score                      |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+    Fields:
+    - T: 4-bit type field = 0x9
+    - U: 3 bits unused (must be zero)
+    - Lives: 3 bits (0-5)
+    - Score: 22 bits (0 to 4,194,303)
+
+–––––––– 
+Appendix
+––––––––
+
+A. Message Size Summary
+
+    Message Type              Transport  Size (bytes)  Frequency
+    ───────────────────────────────────────────────────────────
+    PASSWORD_EXCHANGE         TCP        17            Once
+    SYNC_START                TCP        5             Once
+    MAZE_UPDATE               TCP        435           Once
+    GAME_MODE_UPDATE          TCP        1             On change
+    PACMAN_POSITION           UDP        6 (2+4)       20 fps
+    GHOST_POSITION            UDP        10 (2+8)      20 fps × 4
+    PACMAN_EVENT              TCP        2             On event
+    EAT                       TCP        5             On event
+    LIVES_SCORE_UPDATE        TCP        4             20 fps
+
+B. Internal to Wire Format Mapping
+
+    This protocol requires pa_network.py to map between internal list-based
+    messages and binary wire format:
+
+    Internal → Wire:
+    ────────────────────────────────────────────────────────────
+    ["maze", maze_obj]                    → MAZE_UPDATE (0x3)
+    ["pacman", [pos, dir, spd]]           → PACMAN_POSITION (0x5)
+    ["ghost", [num, pos, dir, spd, mode]] → GHOST_POSITION (0x6)
+    ["newpacman", []]                     → PACMAN_EVENT Foreign Status=0b01
+    ["pacmanleft", []]                    → PACMAN_EVENT Foreign Status=0b00
+    ["pacmandied", []]                    → PACMAN_EVENT Died=1
+    ["pacmanhome", []]                    → PACMAN_EVENT Go Home=1
+    ["eat", [pos, foreign, powerpill]]    → EAT (FP, X, Y)
+    ["ghosteaten", [num]]                 → EAT (GE or FPAE)
+    ["score", [score]]                    → LIVES_SCORE_UPDATE
+    ["lives", [lives]]                    → LIVES_SCORE_UPDATE
+    ["status", [status]]                  → GAME_MODE_UPDATE (0x4)
+
+
+D. References
+
+    - RFC 2119: Key words for use in RFCs
+    - Assignment 5: Pacman Protocol Specification Brief
+    - IEEE 754: Floating-Point Arithmetic Standard
+    - TCP: RFC 793
+    - UDP: RFC 768
